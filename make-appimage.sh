@@ -16,10 +16,14 @@ export GTK_CLASS_FIX=1
 # /usr/lib/convey has the client library, the plugins and the WebKit web
 # process extension, all of them are loaded at runtime. The glob is needed
 # in addition to the directory so the libraries are scanned as libraries,
-# which is what enables webkit and libpeas deployment
+# which is what enables webkit and libpeas deployment.
+# The folks backends are loaded at runtime too. quick-sharun only copies the
+# /usr/lib/folks directory as is, so the backends are passed as well to get
+# their own dependencies (eds.so needs libabsl, for example) deployed
 quick-sharun /usr/bin/convey \
              /usr/lib/convey \
              /usr/lib/convey/* \
+             /usr/lib/folks/*/backends/*/*.so \
              /usr/share/xml/iso-codes
 
 # Additional changes can be done in between here
