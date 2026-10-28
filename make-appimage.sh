@@ -3,16 +3,24 @@
 set -eu
 
 ARCH=$(uname -m)
-VERSION=$(pacman -Q PACKAGENAME | awk '{print $2; exit}') # example command to get version of application here
-export ARCH VERSION
+export ARCH
 export OUTPATH=./dist
 export ADD_HOOKS="self-updater.hook"
 export UPINFO="gh-releases-zsync|${GITHUB_REPOSITORY%/*}|${GITHUB_REPOSITORY#*/}|latest|*$ARCH.AppImage.zsync"
-export ICON=PATH_OR_URL_TO_ICON
-export DESKTOP=PATH_OR_URL_TO_DESKTOP_ENTRY
+export ICON=/usr/share/icons/hicolor/scalable/apps/net.donnybeelo.Convey.svg
+export DESKTOP=/usr/share/applications/net.donnybeelo.Convey.desktop
+export STARTUPWMCLASS=net.donnybeelo.Convey # Default to Wayland's wmclass. For X11, GTK_CLASS_FIX will force the wmclass to the Wayland one.
+export GTK_CLASS_FIX=1
 
 # Deploy dependencies
-quick-sharun /PATH/TO/BINARY_AND_LIBRARIES_HERE
+# /usr/lib/convey has the client library, the plugins and the WebKit web
+# process extension, all of them are loaded at runtime. The glob is needed
+# in addition to the directory so the libraries are scanned as libraries,
+# which is what enables webkit and libpeas deployment
+quick-sharun /usr/bin/convey \
+             /usr/lib/convey \
+             /usr/lib/convey/* \
+             /usr/share/xml/iso-codes
 
 # Additional changes can be done in between here
 

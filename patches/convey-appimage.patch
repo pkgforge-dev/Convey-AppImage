@@ -1,0 +1,216 @@
+diff --git a/src/client/application/application-client.vala b/src/client/application/application-client.vala
+index 2bae38def..9257a7c2e 100644
+--- a/src/client/application/application-client.vala
++++ b/src/client/application/application-client.vala
+@@ -218,9 +218,10 @@ public class Application.Client : Adw.Application {
+         }
+     }
+ 
+-    /** Returns the compile-time configured installation directory. */
++    /** Returns the directory this instance is installed in. */
+     internal GLib.File install_prefix {
+-        get; private set; default = GLib.File.new_for_path(Config.INSTALL_PREFIX);
++        get; private set;
++        default = GLib.File.new_for_path(Files.get_install_prefix());
+     }
+ 
+ 
+@@ -797,7 +798,9 @@ public class Application.Client : Adw.Application {
+      */
+     public GLib.File get_web_extensions_dir() {
+         return (is_installed)
+-            ? GLib.File.new_for_path(Config.WEB_EXTENSIONS_DIR)
++            ? GLib.File.new_for_path(
++                Files.relocate(Config.WEB_EXTENSIONS_DIR)
++            )
+             : GLib.File.new_for_path(Config.BUILD_ROOT_DIR).get_child("src");
+     }
+ 
+@@ -810,7 +813,7 @@ public class Application.Client : Adw.Application {
+      */
+     public GLib.File get_app_plugins_dir() {
+         return (is_installed)
+-            ? GLib.File.new_for_path(Config.PLUGINS_DIR)
++            ? GLib.File.new_for_path(Files.relocate(Config.PLUGINS_DIR))
+             : GLib.File.new_for_path(Config.BUILD_ROOT_DIR)
+                   .get_child("src").get_child("client").get_child("plugin");
+     }
+diff --git a/src/client/application/secret-mediator.vala b/src/client/application/secret-mediator.vala
+index 9e8085358..7a0417dab 100644
+--- a/src/client/application/secret-mediator.vala
++++ b/src/client/application/secret-mediator.vala
+@@ -36,6 +36,8 @@ public class SecretMediator : Convey.CredentialsMediator, Object {
+     );
+ 
+ 
++    private bool available = true;
++
+     public async SecretMediator(Application.Client application,
+                                 GLib.Cancellable? cancellable)
+         throws GLib.Error {
+@@ -53,9 +55,22 @@ public class SecretMediator : Convey.CredentialsMediator, Object {
+             } catch (GLib.Error err) {
+                 warning("Secret portal unavailable, saved passwords won't work: %s",
+                         err.message);
++                this.available = false;
+             }
+         } else {
+-            yield check_unlocked(cancellable);
++            // The same applies to systems without a secret service at
++            // all, for example a minimal session or a container
++            try {
++                yield check_unlocked(cancellable);
++            } catch (GLib.IOError.CANCELLED err) {
++                throw err;
++            } catch (GLib.Error err) {
++                warning(
++                    "Secret service unavailable, saved passwords won't work: %s",
++                    err.message
++                );
++                this.available = false;
++            }
+         }
+     }
+ 
+@@ -66,12 +81,17 @@ public class SecretMediator : Convey.CredentialsMediator, Object {
+         bool loaded = false;
+         if (service.credentials != null) {
+             if (service.remember_password) {
+-                string? password = yield Secret.password_lookupv(
+-                    SecretMediator.schema, new_attrs(service), cancellable
+-                );
+-
+-                if (password == null) {
+-                    password = yield migrate_old_password(service, cancellable);
++                string? password = null;
++                if (this.available) {
++                    password = yield Secret.password_lookupv(
++                        SecretMediator.schema, new_attrs(service), cancellable
++                    );
++
++                    if (password == null) {
++                        password = yield migrate_old_password(
++                            service, cancellable
++                        );
++                    }
+                 }
+ 
+                 if (password != null) {
+@@ -93,7 +113,7 @@ public class SecretMediator : Convey.CredentialsMediator, Object {
+                                    Convey.ServiceInformation service,
+                                    Cancellable? cancellable)
+         throws GLib.Error {
+-        if (service.credentials != null) {
++        if (service.credentials != null && this.available) {
+             yield do_store(service, service.credentials.token, cancellable);
+         }
+     }
+@@ -102,7 +122,7 @@ public class SecretMediator : Convey.CredentialsMediator, Object {
+                                   Convey.ServiceInformation service,
+                                   Cancellable? cancellable)
+         throws Error {
+-        if (service.credentials != null) {
++        if (service.credentials != null && this.available) {
+             yield Secret.password_clearv(SecretMediator.schema,
+                                          new_attrs(service),
+                                          cancellable);
+diff --git a/src/client/plugin/sent-sound/sent-sound.vala b/src/client/plugin/sent-sound/sent-sound.vala
+index e74bc89e2..5cda8816e 100644
+--- a/src/client/plugin/sent-sound/sent-sound.vala
++++ b/src/client/plugin/sent-sound/sent-sound.vala
+@@ -65,7 +65,8 @@ public class Plugin.SentSound : PluginBase, EmailExtension {
+     private void play_sound() {
+         this.player.uri = GLib.File.new_for_path(
+             GLib.Path.build_filename(
+-                Config.PLUGINS_DIR, "sent-sound", "message.oga"
++                global::Files.relocate(Config.PLUGINS_DIR),
++                "sent-sound", "message.oga"
+             )
+         ).get_uri();
+         this.player.play();
+diff --git a/src/client/util/util-files.vala b/src/client/util/util-files.vala
+index d24194632..b92290cfc 100644
+--- a/src/client/util/util-files.vala
++++ b/src/client/util/util-files.vala
+@@ -6,6 +6,46 @@
+ 
+ namespace Files {
+ 
++/**
++ * Returns the directory the application is installed in.
++ *
++ * This is resolved from the path of the running binary, so that the
++ * application finds its resources wherever it is installed, including
++ * inside an AppImage, which is mounted on a random directory.
++ */
++public string get_install_prefix() {
++    string? exe = null;
++    try {
++        exe = GLib.FileUtils.read_link("/proc/self/exe");
++    } catch (GLib.FileError err) {
++        // Fall back to the compiled-in prefix below.
++    }
++
++    if (exe != null) {
++        GLib.File? dir = GLib.File.new_for_path(exe).get_parent();
++        while (dir != null) {
++            if (dir.get_child("share").get_child("convey").query_exists()) {
++                return dir.get_path();
++            }
++            dir = dir.get_parent();
++        }
++    }
++
++    return Config.INSTALL_PREFIX;
++}
++
++/**
++ * Returns a path that was compiled into the application, relocated to
++ * the directory the application is actually installed in.
++ */
++public string relocate(string path) {
++    if (path.has_prefix(Config.INSTALL_PREFIX)) {
++        return get_install_prefix()
++            + path.substring(Config.INSTALL_PREFIX.length);
++    }
++    return path;
++}
++
+ public const int64 KILOBYTE = 1024;
+ public const int64 MEGABYTE = KILOBYTE * 1024;
+ public const int64 GIGABYTE = MEGABYTE * 1024;
+diff --git a/src/client/util/util-i18n.vala b/src/client/util/util-i18n.vala
+index 2129a950f..5e00b5378 100644
+--- a/src/client/util/util-i18n.vala
++++ b/src/client/util/util-i18n.vala
+@@ -32,7 +32,7 @@ namespace Util.I18n {
+ 
+     // TODO: Convey should be able to use langpacks from the build directory
+     private string get_langpack_dir_path(string program_path) {
+-        return Config.LANGUAGE_SUPPORT_DIRECTORY;
++        return Files.relocate(Config.LANGUAGE_SUPPORT_DIRECTORY);
+     }
+ 
+     /**
+@@ -258,7 +258,9 @@ namespace Util.I18n {
+         if (language_names == null) {
+             language_names = new HashTable<string, string>(GLib.str_hash, GLib.str_equal);
+ 
+-            unowned Xml.Doc doc = Xml.Parser.parse_file(Config.ISO_CODE_639_XML);
++            unowned Xml.Doc doc = Xml.Parser.parse_file(
++                Files.relocate(Config.ISO_CODE_639_XML)
++            );
+             if (doc == null) {
+                 return null;
+             }
+@@ -308,7 +310,9 @@ namespace Util.I18n {
+         if (country_names == null) {
+             country_names = new HashTable<string, string>(GLib.str_hash, GLib.str_equal);
+ 
+-            unowned Xml.Doc doc = Xml.Parser.parse_file(Config.ISO_CODE_3166_XML);
++            unowned Xml.Doc doc = Xml.Parser.parse_file(
++                Files.relocate(Config.ISO_CODE_3166_XML)
++            );
+ 
+             if (doc == null) {
+                 return null;
